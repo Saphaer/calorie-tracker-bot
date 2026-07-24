@@ -5,11 +5,11 @@ compatibility_date = "2024-12-30"
 [[d1_databases]]
 binding = "DB"
 database_name = "nourish-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "c475cfb5-b866-4d51-a067-31648959a312"
 migrations_dir = "migrations"
 
 [vars]
 APP_ORIGIN = "http://localhost:5173"
 
 [triggers]
-crons = ["0 8 * * *", "0 16 * * *"]
+crons = ["0 * * * *"]
