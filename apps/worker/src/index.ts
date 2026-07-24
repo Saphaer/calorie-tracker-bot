@@ -13,7 +13,8 @@ type Bindings = {
 };
 
 type Variables = { userId: string; telegramId: string };
-type TelegramUser = { id: number; first_name: string; last_name?: string; username?: string; photo_url?: string };
+type TelegramUser = { id: number; first_name: string; last_name?: string; username?: string; photo_url?: string; language_code?: string };
+type RewardUnlock = { id: string; type: 'mission' | 'achievement'; title: string; xp: number; level: number; leveledUp: boolean };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const now = () => new Date().toISOString();
@@ -70,6 +71,7 @@ async function ensureUser(database: D1Database, telegram: TelegramUser) {
       database.prepare('INSERT INTO streaks (id,user_id,created_at,updated_at) VALUES (?,?,?,?)').bind(id(), userId, timestamp, timestamp),
       database.prepare('INSERT INTO settings (id,user_id,created_at,updated_at) VALUES (?,?,?,?)').bind(id(), userId, timestamp, timestamp),
     ]);
+    if (telegram.language_code?.startsWith('ru')) await database.prepare("UPDATE settings SET language='ru' WHERE user_id=?").bind(userId).run();
     user = await database.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first<Record<string, unknown>>();
   }
   return user!;
@@ -145,7 +147,7 @@ async function evaluateRewards(database: D1Database, userId: string) {
     water: Number(progress?.water_ml ?? 0), protein: Number(progress?.protein ?? 0), breakfast: types.has('breakfast') ? 1 : 0,
     meal_types: ['breakfast', 'lunch', 'dinner'].filter((type) => types.has(type)).length, active_days: Number(activeDays?.count ?? 0),
   };
-  const unlocked: Array<{ type: 'mission' | 'achievement'; title: string; xp: number; leveledUp: boolean }> = [];
+  const unlocked: RewardUnlock[] = [];
   const missionRows = await database.prepare('SELECT * FROM missions WHERE active=1').all<Record<string, unknown>>();
   for (const mission of missionRows.results) {
     const periodKey = mission.period === 'weekly' ? `week:${new Date().toISOString().slice(0, 7)}:${Math.ceil(new Date().getUTCDate() / 7)}` : today();
@@ -156,7 +158,7 @@ async function evaluateRewards(database: D1Database, userId: string) {
     await database.prepare(`INSERT INTO completed_missions (id,user_id,mission_id,period_key,progress,completed_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id,mission_id,period_key) DO UPDATE SET progress=excluded.progress,completed_at=coalesce(completed_missions.completed_at,excluded.completed_at),updated_at=excluded.updated_at`).bind(id(), userId, mission.id, periodKey, value, completedAt, now(), now()).run();
     if (completedAt && !existing?.completed_at) {
       const reward = await awardXp(database, userId, Number(mission.xp_reward), `Mission: ${mission.title}`, String(mission.id));
-      unlocked.push({ type: 'mission', title: String(mission.title), xp: Number(mission.xp_reward), leveledUp: reward.leveledUp });
+      unlocked.push({ id: String(mission.id), type: 'mission', title: String(mission.title), xp: Number(mission.xp_reward), level: reward.level, leveledUp: reward.leveledUp });
     }
   }
   const goalReached = user.goal === 'gain' ? Number(user.current_weight_kg) >= Number(user.target_weight_kg) : user.goal === 'lose' ? Number(user.current_weight_kg) <= Number(user.target_weight_kg) : false;
@@ -167,7 +169,7 @@ async function evaluateRewards(database: D1Database, userId: string) {
     const result = await database.prepare('INSERT OR IGNORE INTO user_achievements (id,user_id,achievement_id,unlocked_at,created_at,updated_at) VALUES (?,?,?,?,?,?)').bind(id(), userId, achievement.id, now(), now(), now()).run();
     if (result.meta.changes > 0) {
       const reward = await awardXp(database, userId, Number(achievement.xp_reward), `Achievement: ${achievement.title}`, String(achievement.id));
-      unlocked.push({ type: 'achievement', title: String(achievement.title), xp: Number(achievement.xp_reward), leveledUp: reward.leveledUp });
+      unlocked.push({ id: String(achievement.id), type: 'achievement', title: String(achievement.title), xp: Number(achievement.xp_reward), level: reward.level, leveledUp: reward.leveledUp });
     }
   }
   return unlocked;
@@ -243,6 +245,7 @@ app.post('/api/meals', zValidator('json', mealSchema), async (context) => {
   ]);
   const reward = await awardXp(context.env.DB,userId,10,'Meal logged',mealId);
   const rewards = await evaluateRewards(context.env.DB, userId);
+  await notifyRewards(context.env, userId, rewards, reward.leveledUp ? reward.level : undefined);
   return context.json(ok({ id: itemId, reward, rewards }), 201);
 });
 app.delete('/api/meals/:itemId', async (context) => {
@@ -250,9 +253,9 @@ app.delete('/api/meals/:itemId', async (context) => {
   await context.env.DB.batch([context.env.DB.prepare('DELETE FROM meal_items WHERE id=?').bind(item.id),context.env.DB.prepare('DELETE FROM meals WHERE id=?').bind(item.meal_id),context.env.DB.prepare('UPDATE daily_progress SET calories=max(0,calories-?),protein=max(0,protein-?),carbs=max(0,carbs-?),fat=max(0,fat-?),meals_logged=max(0,meals_logged-1),updated_at=? WHERE user_id=? AND date=?').bind(item.calories,item.protein,item.carbs,item.fat,now(),userId,String(item.logged_at).slice(0,10))]); return context.json(ok({deleted:true}));
 });
 
-app.post('/api/water', zValidator('json', z.object({ amountMl: z.number().int().min(50).max(5000) })), async (context) => { const {amountMl}=context.req.valid('json'); const userId=context.get('userId'); await touchDaily(context.env.DB,userId); await context.env.DB.batch([context.env.DB.prepare('INSERT INTO water_logs (id,user_id,amount_ml,logged_at,created_at,updated_at) VALUES (?,?,?,?,?,?)').bind(id(),userId,amountMl,now(),now(),now()),context.env.DB.prepare('UPDATE daily_progress SET water_ml=water_ml+?,updated_at=? WHERE user_id=? AND date=?').bind(amountMl,now(),userId,today())]); const rewards=await evaluateRewards(context.env.DB,userId); return context.json(ok({amountMl,rewards})); });
+app.post('/api/water', zValidator('json', z.object({ amountMl: z.number().int().min(50).max(5000) })), async (context) => { const {amountMl}=context.req.valid('json'); const userId=context.get('userId'); await touchDaily(context.env.DB,userId); await context.env.DB.batch([context.env.DB.prepare('INSERT INTO water_logs (id,user_id,amount_ml,logged_at,created_at,updated_at) VALUES (?,?,?,?,?,?)').bind(id(),userId,amountMl,now(),now(),now()),context.env.DB.prepare('UPDATE daily_progress SET water_ml=water_ml+?,updated_at=? WHERE user_id=? AND date=?').bind(amountMl,now(),userId,today())]); const rewards=await evaluateRewards(context.env.DB,userId); await notifyRewards(context.env,userId,rewards); return context.json(ok({amountMl,rewards})); });
 app.get('/api/weights', async (context) => { const rows=await context.env.DB.prepare('SELECT id,weight_kg,logged_at FROM weight_logs WHERE user_id=? ORDER BY logged_at DESC LIMIT 120').bind(context.get('userId')).all<Record<string,unknown>>(); return context.json(ok(rows.results.map(row=>({id:row.id,weightKg:row.weight_kg,loggedAt:row.logged_at})))); });
-app.post('/api/weights', zValidator('json', z.object({ weightKg:z.number().min(35).max(350), note:z.string().max(200).optional() })), async (context) => { const input=context.req.valid('json'); const timestamp=now(); await context.env.DB.batch([context.env.DB.prepare('INSERT INTO weight_logs (id,user_id,weight_kg,logged_at,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(id(),context.get('userId'),input.weightKg,timestamp,input.note??null,timestamp,timestamp),context.env.DB.prepare('UPDATE users SET current_weight_kg=?,updated_at=? WHERE id=?').bind(input.weightKg,timestamp,context.get('userId'))]); const rewards=await evaluateRewards(context.env.DB,context.get('userId')); return context.json(ok({weightKg:input.weightKg,loggedAt:timestamp,rewards}),201); });
+app.post('/api/weights', zValidator('json', z.object({ weightKg:z.number().min(35).max(350), note:z.string().max(200).optional() })), async (context) => { const input=context.req.valid('json'); const timestamp=now(); const userId=context.get('userId'); await context.env.DB.batch([context.env.DB.prepare('INSERT INTO weight_logs (id,user_id,weight_kg,logged_at,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').bind(id(),userId,input.weightKg,timestamp,input.note??null,timestamp,timestamp),context.env.DB.prepare('UPDATE users SET current_weight_kg=?,updated_at=? WHERE id=?').bind(input.weightKg,timestamp,userId)]); const rewards=await evaluateRewards(context.env.DB,userId); await notifyRewards(context.env,userId,rewards); return context.json(ok({weightKg:input.weightKg,loggedAt:timestamp,rewards}),201); });
 
 app.get('/api/stats', async (context) => { const days=Math.min(90,Math.max(7,Number(context.req.query('days')??7))); const since=new Date(Date.now()-(days-1)*86_400_000).toISOString().slice(0,10); const [progress,weights]=await Promise.all([context.env.DB.prepare('SELECT * FROM daily_progress WHERE user_id=? AND date>=? ORDER BY date').bind(context.get('userId'),since).all<Record<string,unknown>>(),context.env.DB.prepare('SELECT weight_kg,logged_at FROM weight_logs WHERE user_id=? AND substr(logged_at,1,10)>=? ORDER BY logged_at').bind(context.get('userId'),since).all<Record<string,unknown>>()]); return context.json(ok({days:progress.results.map(row=>({date:row.date,calories:row.calories,protein:row.protein,carbs:row.carbs,fat:row.fat,waterMl:row.water_ml})),weights:weights.results.map(row=>({weightKg:row.weight_kg,loggedAt:row.logged_at}))})); });
 app.get('/api/settings', async (context) => { const row=await context.env.DB.prepare('SELECT * FROM settings WHERE user_id=?').bind(context.get('userId')).first<Record<string,unknown>>(); return context.json(ok(row)); });
@@ -262,9 +265,36 @@ app.get('/api/export', async(context)=>{const userId=context.get('userId'); cons
 app.delete('/api/account',async(context)=>{await context.env.DB.prepare('DELETE FROM users WHERE id=?').bind(context.get('userId')).run(); return context.json(ok({deleted:true}));});
 
 type TelegramUpdate={message?:{chat:{id:number};text?:string;from?:TelegramUser}};
-async function sendTelegram(token:string,chatId:string|number,text:string,appUrl?:string){await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:chatId,text,parse_mode:'HTML',reply_markup:appUrl?{inline_keyboard:[[{text:'Open Nourish',web_app:{url:appUrl}}]]}:undefined})});}
-app.post('/telegram/webhook',async(context)=>{if(context.env.TELEGRAM_WEBHOOK_SECRET&&context.req.header('X-Telegram-Bot-Api-Secret-Token')!==context.env.TELEGRAM_WEBHOOK_SECRET) throw new HTTPException(401,{message:'Invalid webhook secret'}); const update=await context.req.json<TelegramUpdate>(); const message=update.message; if(!message?.from||!message.text||!context.env.TELEGRAM_BOT_TOKEN)return context.json({ok:true}); await ensureUser(context.env.DB,message.from); const command=message.text.split(' ')[0].toLowerCase(); const copy=command==='/help'?'Use Nourish to log meals, water, and weight. Your dashboard tracks daily targets, streaks, XP, missions, and achievements.':command==='/start'?'<b>Welcome to Nourish.</b>\nYour calm daily companion for nutrition, hydration, weight, and healthier habits.':'Open your Nourish dashboard below.'; await sendTelegram(context.env.TELEGRAM_BOT_TOKEN,message.chat.id,copy,context.env.APP_ORIGIN); return context.json({ok:true});});
+async function sendTelegram(token:string,chatId:string|number,text:string,appUrl?:string,russian=false){await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:chatId,text,parse_mode:'HTML',reply_markup:appUrl?{inline_keyboard:[[{text:russian?'Открыть Nourish':'Open Nourish',web_app:{url:appUrl}}]]}:undefined})});}
+const russianRewardTitles: Record<string,string> = {
+  'water-2l':'Цель по воде',
+  'log-breakfast':'Утренний ритм',
+  'protein-goal':'Цель по белку',
+  'all-meals':'Полный день',
+  'weekly-consistency':'Стабильная неделя',
+  'first-meal':'Первая еда',
+  'healthy-week':'Здоровая неделя',
+  'protein-master':'Мастер белка',
+  'hydration-hero':'Герой воды',
+  'consistency-king':'Король регулярности',
+  'hundred-meals':'100 приёмов пищи',
+  'goal-weight':'Целевой вес',
+};
+async function notifyRewards(env:Bindings,userId:string,rewards:RewardUnlock[],level?:number){
+  if(!env.TELEGRAM_BOT_TOKEN||(!rewards.length&&!level))return;
+  const recipient=await env.DB.prepare('SELECT u.telegram_id,s.language FROM users u JOIN settings s ON s.user_id=u.id WHERE u.id=?').bind(userId).first<{telegram_id:string;language:string}>();
+  if(!recipient?.telegram_id)return;
+  const russian=recipient.language==='ru';
+  for(const reward of rewards){
+    const title=russian?russianRewardTitles[reward.id]??reward.title:reward.title;
+    const heading=reward.type==='mission'?(russian?'Задание выполнено':'Mission complete'):(russian?'Достижение открыто':'Achievement unlocked');
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN,recipient.telegram_id,`<b>${heading}</b>\n${title}\n+${reward.xp} XP`,env.APP_ORIGIN,russian);
+  }
+  const newLevel=level??rewards.filter((reward)=>reward.leveledUp).at(-1)?.level;
+  if(newLevel)await sendTelegram(env.TELEGRAM_BOT_TOKEN,recipient.telegram_id,russian?`<b>Новый уровень: ${newLevel}</b>\nПродолжайте в том же ритме.`:`<b>Level ${newLevel} reached</b>\nKeep building your momentum.`,env.APP_ORIGIN,russian);
+}
+app.post('/telegram/webhook',async(context)=>{if(context.env.TELEGRAM_WEBHOOK_SECRET&&context.req.header('X-Telegram-Bot-Api-Secret-Token')!==context.env.TELEGRAM_WEBHOOK_SECRET) throw new HTTPException(401,{message:'Invalid webhook secret'}); const update=await context.req.json<TelegramUpdate>(); const message=update.message; if(!message?.from||!message.text||!context.env.TELEGRAM_BOT_TOKEN)return context.json({ok:true}); const user=await ensureUser(context.env.DB,message.from); const settingsRow=await context.env.DB.prepare('SELECT language FROM settings WHERE user_id=?').bind(user.id).first<{language:string}>(); const russian=settingsRow?.language==='ru'||message.from.language_code?.startsWith('ru')===true; const command=message.text.split(' ')[0].toLowerCase(); const copy=russian?(command==='/help'?'Используйте Nourish для учёта еды, воды и веса. Приложение отслеживает цели, серии, XP, задания и достижения.':command==='/start'?'<b>Добро пожаловать в Nourish.</b>\nВаш спокойный помощник для питания, воды, веса и полезных привычек.':'Откройте панель Nourish ниже.'):(command==='/help'?'Use Nourish to log meals, water, and weight. Your dashboard tracks daily targets, streaks, XP, missions, and achievements.':command==='/start'?'<b>Welcome to Nourish.</b>\nYour calm daily companion for nutrition, hydration, weight, and healthier habits.':'Open your Nourish dashboard below.'); await sendTelegram(context.env.TELEGRAM_BOT_TOKEN,message.chat.id,copy,context.env.APP_ORIGIN,russian); return context.json({ok:true});});
 
-async function runReminders(env:Bindings){if(!env.TELEGRAM_BOT_TOKEN)return; const currentTime=new Date(); const rows=await env.DB.prepare(`SELECT u.telegram_id,u.first_name,s.daily_reminder,s.water_reminder,s.streak_warning,s.reminder_hour,s.timezone,coalesce(dp.water_ml,0) water_ml,u.water_target_ml,st.last_active_date FROM users u JOIN settings s ON s.user_id=u.id JOIN streaks st ON st.user_id=u.id LEFT JOIN daily_progress dp ON dp.user_id=u.id AND dp.date=? WHERE u.onboarding_complete=1`).bind(today()).all<Record<string,unknown>>(); for(const row of rows.results){let localHour:number;try{localHour=Number(new Intl.DateTimeFormat('en-US',{timeZone:String(row.timezone||'UTC'),hour:'2-digit',hour12:false}).format(currentTime));}catch{localHour=currentTime.getUTCHours();}let text=''; if(Boolean(row.daily_reminder)&&Number(row.reminder_hour)===localHour)text=`Good morning, ${row.first_name}. Your Nourish plan is ready.`; else if(Boolean(row.water_reminder)&&localHour===16&&Number(row.water_ml)<Number(row.water_target_ml)*0.6)text=`Hydration check: you are at ${row.water_ml} ml today. A glass of water keeps your goal moving.`; else if(Boolean(row.streak_warning)&&localHour===20&&row.last_active_date!==today())text='Your daily streak is still waiting. Log one meal or glass of water to keep it alive.'; if(text)await sendTelegram(env.TELEGRAM_BOT_TOKEN,String(row.telegram_id),text,env.APP_ORIGIN);}}
+async function runReminders(env:Bindings){if(!env.TELEGRAM_BOT_TOKEN)return; const currentTime=new Date(); const rows=await env.DB.prepare(`SELECT u.telegram_id,u.first_name,s.language,s.daily_reminder,s.water_reminder,s.streak_warning,s.reminder_hour,s.timezone,coalesce(dp.water_ml,0) water_ml,u.water_target_ml,st.last_active_date FROM users u JOIN settings s ON s.user_id=u.id JOIN streaks st ON st.user_id=u.id LEFT JOIN daily_progress dp ON dp.user_id=u.id AND dp.date=? WHERE u.onboarding_complete=1`).bind(today()).all<Record<string,unknown>>(); for(const row of rows.results){let localHour:number;try{localHour=Number(new Intl.DateTimeFormat('en-US',{timeZone:String(row.timezone||'UTC'),hour:'2-digit',hour12:false}).format(currentTime));}catch{localHour=currentTime.getUTCHours();}const russian=row.language==='ru';let text=''; if(Boolean(row.daily_reminder)&&Number(row.reminder_hour)===localHour)text=russian?`Доброе утро, ${row.first_name}. Ваш план Nourish на сегодня готов.`:`Good morning, ${row.first_name}. Your Nourish plan is ready.`; else if(Boolean(row.water_reminder)&&localHour===16&&Number(row.water_ml)<Number(row.water_target_ml)*0.6)text=russian?`Проверка воды: сегодня выпито ${row.water_ml} мл. Стакан воды поможет приблизиться к цели.`:`Hydration check: you are at ${row.water_ml} ml today. A glass of water keeps your goal moving.`; else if(Boolean(row.streak_warning)&&localHour===20&&row.last_active_date!==today())text=russian?'Ваша серия ещё ждёт. Запишите еду или стакан воды, чтобы сохранить её.':'Your daily streak is still waiting. Log one meal or glass of water to keep it alive.'; if(text)await sendTelegram(env.TELEGRAM_BOT_TOKEN,String(row.telegram_id),text,env.APP_ORIGIN,russian);}}
 
 export default { fetch: app.fetch, scheduled: (_controller:ScheduledController,env:Bindings,context:ExecutionContext)=>context.waitUntil(runReminders(env)) };

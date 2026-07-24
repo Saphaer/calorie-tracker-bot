@@ -9,7 +9,7 @@ database_id = "c475cfb5-b866-4d51-a067-31648959a312"
 migrations_dir = "migrations"
 
 [vars]
-APP_ORIGIN = "http://localhost:5173"
+APP_ORIGIN = "https://calorie-tracker-bot.pages.dev"
 
 [triggers]
 crons = ["0 * * * *"]
