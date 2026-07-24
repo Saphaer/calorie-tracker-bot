@@ -31,10 +31,7 @@ Invoke-Telegram 'setMyCommands' @{ commands = @(
     @{ command = 'open'; description = 'Open the nutrition dashboard' },
     @{ command = 'help'; description = 'Show help' }
   ) } | Out-Null
-Invoke-Telegram 'setMyCommands' @{ language_code = 'ru'; commands = @(
-    @{ command = 'start'; description = 'Запустить Nourish' },
-    @{ command = 'open'; description = 'Открыть дневник питания' },
-    @{ command = 'help'; description = 'Помощь' }
-  ) } | Out-Null
+$ruCommands = '[{"command":"start","description":"\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c Nourish"},{"command":"open","description":"\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0438\u0442\u0430\u043d\u0438\u044f"},{"command":"help","description":"\u041f\u043e\u043c\u043e\u0449\u044c"}]' | ConvertFrom-Json
+Invoke-Telegram 'setMyCommands' @{ language_code = 'ru'; commands = $ruCommands } | Out-Null
 
 [pscustomobject]@{ Bot = "@$($bot.username)"; Webhook = "$WorkerUrl/telegram/webhook"; MiniApp = $MiniAppUrl } | Format-List
