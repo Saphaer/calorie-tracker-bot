@@ -1,0 +1,4 @@
+import { create } from 'zustand';
+export type Tab='home'|'log'|'progress'|'rewards'|'profile';
+type AppState={tab:Tab;setTab:(tab:Tab)=>void;addMealOpen:boolean;setAddMealOpen:(open:boolean)=>void;waterOpen:boolean;setWaterOpen:(open:boolean)=>void;toast:string|null;showToast:(message:string)=>void;theme:'light'|'dark'|'system';setTheme:(theme:'light'|'dark'|'system')=>void};
+export const useAppStore=create<AppState>((set)=>({tab:'home',setTab:(tab)=>set({tab}),addMealOpen:false,setAddMealOpen:(addMealOpen)=>set({addMealOpen}),waterOpen:false,setWaterOpen:(waterOpen)=>set({waterOpen}),toast:null,showToast:(toast)=>{set({toast});setTimeout(()=>set({toast:null}),2600)},theme:(localStorage.getItem('theme') as AppState['theme'])||'system',setTheme:(theme)=>{localStorage.setItem('theme',theme);set({theme})}}));

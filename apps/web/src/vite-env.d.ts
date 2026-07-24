@@ -1,0 +1,2 @@
+/// <reference types="vite/client" />
+interface Window { Telegram?: { WebApp?: { initData:string; ready():void; expand():void; close():void; HapticFeedback?:{impactOccurred(type:'light'|'medium'|'heavy'):void;notificationOccurred(type:'error'|'success'|'warning'):void}; BackButton?:{show():void;hide():void;onClick(cb:()=>void):void;offClick(cb:()=>void):void}; themeParams?:Record<string,string>; colorScheme?:'light'|'dark' } } }
