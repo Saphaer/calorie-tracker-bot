@@ -1,7 +1,7 @@
 import type { DashboardData, Food, WeightLog } from '@nourish/shared';
 import { demoDashboard, demoFoods, demoWeights } from './demo';
 
-const base = import.meta.env.VITE_API_URL as string | undefined;
+const base = (import.meta.env.VITE_API_URL as string | undefined) ?? (import.meta.env.PROD ? 'https://nourish-api.sfrnuri.workers.dev' : undefined);
 const headers = () => ({
   'content-type': 'application/json',
   'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData ?? '',
